@@ -3,6 +3,7 @@ import sys
 import os
 import ssl
 from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 
 def parse_http_response(response):
     """Parse HTTP response into headers and body"""
@@ -56,8 +57,9 @@ def make_http_request(host, path, port=80, use_ssl=False):
         request = f"GET {path} HTTP/1.1\r\n"
         request += f"Host: {host}\r\n"
         request += "Connection: close\r\n"
-        request += "User-Agent: go2web/0.1\r\n"
+        request += "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\r\n"
         request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+        request += "Accept-Language: en-US,en;q=0.9\r\n"
         request += "\r\n"
         
         # Send the request
@@ -86,6 +88,54 @@ def make_http_request(host, path, port=80, use_ssl=False):
         return f"Error: {str(e)}"
     finally:
         s.close()
+
+def extract_content_from_html(html):
+    """Extract meaningful content from HTML using BeautifulSoup"""
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        all_content = []
+        
+        # Extract title
+        if soup.title:
+            all_content.append(f"---- {soup.title.text.strip()}")
+        
+        # Extract headings
+        for i in range(1, 4):  # h1, h2, h3
+            for heading in soup.find_all(f'h{i}'):
+                all_content.append(f"---- {heading.text.strip()}")
+        
+        # Extract paragraphs
+        for p in soup.find_all('p'):
+            text = p.text.strip()
+            if text:  # Only add non-empty paragraphs
+                all_content.append(f"- {text}")
+        
+        # Extract links
+        links = []
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            text = a.text.strip()
+            
+            # Only process http/https links
+            if href.startswith('http'):
+                if text:
+                    links.append(f"{text}: {href}")
+                else:
+                    links.append(href)
+        
+        # Add links section
+        if links:
+            all_content.append("-- Links --")
+            all_content.extend(links[:20])  # Limit to 20 links to avoid overwhelming output
+        
+        # If no meaningful content was extracted, provide a message
+        if not all_content:
+            all_content = ["No meaningful content could be extracted from this page.", 
+                          "The page might require JavaScript or be protected against scraping."]
+        
+        return all_content
+    except Exception as e:
+        return [f"Error parsing HTML content: {str(e)}"]
 
 def request_url(url, follow_redirects=True):
     """Make an HTTP request to the specified URL"""
@@ -134,13 +184,25 @@ def request_url(url, follow_redirects=True):
     # Process response
     headers, body = parse_http_response(response)
     
-    if headers:
-        print("--- Response Headers ---")
-        for key, value in headers.items():
-            print(f"{key}: {value}")
-        print("\n--- Response Body ---")
+    if not headers:
+        print(f"Error: Invalid response format: {response[:200]}...")
+        return
     
-    print(body)
+    # Extract and print content based on content type
+    content_type = headers.get('content-type', '').lower()
+    
+    if 'text/html' in content_type:
+        # Extract useful content from HTML
+        content = extract_content_from_html(body)
+        print(f"Information from {url}:")
+        for line in content:
+            print(line)
+    else:
+        # Just print the raw content for non-HTML responses
+        print(f"Content from {url} (Content-Type: {content_type}):")
+        print(body[:4000])  # Limit output to first 4000 chars
+        if len(body) > 4000:
+            print("... (output truncated)")
 
 def print_help():
     """Print help information"""
