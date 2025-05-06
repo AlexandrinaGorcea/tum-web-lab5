@@ -2,7 +2,7 @@ import socket
 import sys
 import os
 import ssl
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus
 from bs4 import BeautifulSoup
 
 def parse_http_response(response):
@@ -204,10 +204,59 @@ def request_url(url, follow_redirects=True):
         if len(body) > 4000:
             print("... (output truncated)")
 
+def search(term):
+    """Search using DuckDuckGo and return results"""
+    search_term = quote_plus(term)
+    
+    # Use the lite version of DuckDuckGo which is more reliable for scraping
+    url = f"https://lite.duckduckgo.com/lite?q={search_term}"
+    
+    # Make request
+    response = make_http_request("lite.duckduckgo.com", f"/lite?q={search_term}", port=443, use_ssl=True)
+    
+    # Extract search results using BeautifulSoup
+    try:
+        headers, body = parse_http_response(response)
+        soup = BeautifulSoup(body, 'html.parser')
+        results = []
+        
+        # DuckDuckGo lite uses a simple table structure
+        for i, tr in enumerate(soup.find_all('tr', class_='result-item')):
+            if i >= 10:  # Limit to 10 results
+                break
+                
+            try:
+                # Find link and snippet
+                link_elem = tr.find('a', class_='result-link') or tr.find('a')
+                snippet_elem = tr.find(class_='result-snippet') or tr.find_next_sibling('tr')
+                
+                if link_elem:
+                    title = link_elem.text.strip()
+                    href = link_elem.get('href', '')
+                    
+                    # Extract snippet if available
+                    snippet = ""
+                    if snippet_elem:
+                        snippet = snippet_elem.text.strip()
+                    
+                    results.append(f"{i+1}. {title}\n   {href}\n   {snippet}")
+            except Exception as e:
+                print(f"Error processing search result {i+1}: {str(e)}")
+        
+        # If no results found, provide a message
+        if not results:
+            results = ["No search results found. Please try a different search term."]
+        
+        return results
+        
+    except Exception as e:
+        return [f"Error parsing search results: {str(e)}. Please try a different search term."]
+
 def print_help():
     """Print help information"""
-    print("go2web -u <URL>    # make an HTTP request to the specified URL and print the response")
-    print("go2web -h          # show this help")
+    print("go2web -u <URL>                # make an HTTP request to the specified URL and print the response")
+    print("go2web -s <search-term>        # search the term and print results")
+    print("go2web -h                      # show this help")
 
 def main():
     args = sys.argv[1:]
@@ -219,6 +268,13 @@ def main():
     if args[0] == '-u' and len(args) > 1:
         url = args[1]
         request_url(url)
+    elif args[0] == '-s' and len(args) > 1:
+        search_term = " ".join(args[1:])
+        print(f"Search results for '{search_term}':")
+        results = search(search_term)
+        for result in results:
+            print(result)
+            print()
     else:
         print("Error: Invalid arguments.")
         print_help()
