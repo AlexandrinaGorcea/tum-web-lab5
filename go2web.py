@@ -1,9 +1,41 @@
 import socket
 import sys
 import os
+import time
 import ssl
 from urllib.parse import urlparse, quote_plus
 from bs4 import BeautifulSoup
+from tinydb import TinyDB, Query
+
+# Cache mechanism using TinyDB
+CACHE_DIR = ".go2web_cache"
+CACHE_DB = "go2web_cache.json"
+CACHE_DURATION = 3600  # 1 hour in seconds
+
+def setup_cache():
+    """Create cache directory if it doesn't exist"""
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+    return TinyDB(os.path.join(CACHE_DIR, CACHE_DB))
+
+def get_from_cache(url):
+    """Get response from cache if valid"""
+    db = setup_cache()
+    Cache = Query()
+    result = db.search((Cache.url == url) & (Cache.timestamp > time.time() - CACHE_DURATION))
+    if result:
+        return result[0]['content']
+    return None
+
+def save_to_cache(url, content):
+    """Save response to cache"""
+    db = setup_cache()
+    Cache = Query()
+    # Update or insert
+    db.upsert(
+        {'url': url, 'content': content, 'timestamp': time.time()},
+        Cache.url == url
+    )
 
 def parse_http_response(response):
     """Parse HTTP response into headers and body"""
@@ -143,6 +175,14 @@ def request_url(url, follow_redirects=True):
     if not url.startswith("http://") and not url.startswith("https://"):
         url = "http://" + url
     
+    # Check cache first
+    cached_content = get_from_cache(url)
+    if cached_content:
+        print(f"Information from {url} (cached):")
+        for line in cached_content:
+            print(line)
+        return
+    
     # Parse URL
     parsed_url = urlparse(url)
     host = parsed_url.netloc
@@ -188,7 +228,7 @@ def request_url(url, follow_redirects=True):
         print(f"Error: Invalid response format: {response[:200]}...")
         return
     
-    # Extract and print content based on content type
+    # Process response based on content type
     content_type = headers.get('content-type', '').lower()
     
     if 'text/html' in content_type:
@@ -197,12 +237,17 @@ def request_url(url, follow_redirects=True):
         print(f"Information from {url}:")
         for line in content:
             print(line)
+        
+        # Cache the content
+        save_to_cache(url, content)
     else:
-        # Just print the raw content for non-HTML responses
+        # For non-HTML, just print the content
         print(f"Content from {url} (Content-Type: {content_type}):")
-        print(body[:4000])  # Limit output to first 4000 chars
         if len(body) > 4000:
+            print(body[:4000])
             print("... (output truncated)")
+        else:
+            print(body)
 
 def search(term):
     """Search using DuckDuckGo and return results"""
@@ -210,6 +255,11 @@ def search(term):
     
     # Use the lite version of DuckDuckGo which is more reliable for scraping
     url = f"https://lite.duckduckgo.com/lite?q={search_term}"
+    
+    # Check cache first
+    cached_results = get_from_cache(url)
+    if cached_results:
+        return cached_results
     
     # Make request
     response = make_http_request("lite.duckduckgo.com", f"/lite?q={search_term}", port=443, use_ssl=True)
@@ -247,10 +297,15 @@ def search(term):
         if not results:
             results = ["No search results found. Please try a different search term."]
         
+        # Cache the results
+        save_to_cache(url, results)
+        
         return results
         
     except Exception as e:
-        return [f"Error parsing search results: {str(e)}. Please try a different search term."]
+        error_message = [f"Error parsing search results: {str(e)}. Please try a different search term."]
+        save_to_cache(url, error_message)  # Cache the error to avoid repeated failures
+        return error_message
 
 def print_help():
     """Print help information"""
