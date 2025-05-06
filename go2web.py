@@ -131,6 +131,56 @@ def make_http_request(host, path, headers=None, port=80, use_ssl=False):
     finally:
         s.close()
 
+def format_json(data, prefix="", max_depth=3, current_depth=0):
+    """Format JSON data for human-readable output"""
+    result = []
+    
+    # Prevent going too deep in nested structures
+    if current_depth >= max_depth:
+        return [f"{prefix}[Complex nested data]"]
+    
+    if isinstance(data, dict):
+        # Handle dictionaries (JSON objects)
+        if current_depth == 0:
+            result.append("JSON Content:")
+        
+        for key, value in data.items():
+            if isinstance(value, dict):
+                result.append(f"{prefix}--- {key} ---")
+                result.extend(format_json(value, prefix + "  ", max_depth, current_depth + 1))
+            elif isinstance(value, list):
+                if not value:
+                    result.append(f"{prefix}- {key}: []")
+                else:
+                    result.append(f"{prefix}- {key}: [Array with {len(value)} items]")
+                    result.extend(format_json(value, prefix + "  ", max_depth, current_depth + 1))
+            else:
+                result.append(f"{prefix}- {key}: {value}")
+    
+    elif isinstance(data, list):
+        # Handle lists (JSON arrays)
+        if current_depth == 0:
+            result.append("JSON Content: [Array]")
+        
+        # Limit the number of items shown
+        display_limit = 10
+        
+        for i, item in enumerate(data[:display_limit]):
+            if isinstance(item, (dict, list)):
+                result.append(f"{prefix}Item {i+1}:")
+                result.extend(format_json(item, prefix + "  ", max_depth, current_depth + 1))
+            else:
+                result.append(f"{prefix}Item {i+1}: {item}")
+        
+        if len(data) > display_limit:
+            result.append(f"{prefix}... and {len(data) - display_limit} more items")
+    
+    else:
+        # Handle primitive types (strings, numbers, booleans, null)
+        result.append(f"{prefix}{data}")
+    
+    return result
+
 def extract_content_from_html(html):
     """Extract meaningful content from HTML using BeautifulSoup"""
     try:
@@ -239,69 +289,62 @@ def request_url(url, follow_redirects=True, accept_header=None):
     if not headers:
         return [f"Error: Invalid response format: {response[:200]}..."]
     
-    # Process response based on content type
-    content_type = headers.get('content-type', '').lower()
+    # Handle content negotiation
+    content_type = headers.get('content-type', '').lower() if headers else ''
     
-    if 'text/html' in content_type:
-        # Extract useful content from HTML using BeautifulSoup
-        content = extract_content_from_html(body)
-        return content
+    # Process response based on content type
+    if 'application/json' in content_type or (body.strip().startswith('{') and body.strip().endswith('}')):
+        try:
+            import json
+            data = json.loads(body)
+            return format_json(data)
+        except json.JSONDecodeError as e:
+            return [f"Error parsing JSON content: {str(e)}"]
     else:
-        # For non-HTML, just print the content
-        if len(body) > 4000:
-            return [f"Content from {url} (Content-Type: {content_type}):", body[:4000], "... (output truncated)"]
-        else:
-            return [f"Content from {url} (Content-Type: {content_type}):", body]
+        # Extract useful content from HTML using BeautifulSoup
+        result = extract_content_from_html(body)
+    
+    # Cache the processed content
+    save_to_cache(url, result)
+    
+    return result
 
 def search(term):
-    """Search using DuckDuckGo and return results"""
+    """Search Bing and return top 10 results"""
     search_term = quote_plus(term)
-    # Use the lite version of DuckDuckGo which is more reliable for scraping
-    url = f"https://lite.duckduckgo.com/lite?q={search_term}"
-    
-    # Check cache first
-    cached_results = get_from_cache(url)
-    if cached_results:
-        return cached_results
-    
-    # Make request
-    response = make_http_request("lite.duckduckgo.com", f"/lite?q={search_term}", port=443, use_ssl=True)
-    
+    url = f"https://www.bing.com/search?q={search_term}"
+
+    # Make the HTTP request
+    response = make_http_request("www.bing.com", f"/search?q={search_term}", port=443, use_ssl=True)
+
     try:
         headers, body = parse_http_response(response)
         soup = BeautifulSoup(body, 'html.parser')
-        
         results = []
-        
-        # Find all search result items
-        for idx, result in enumerate(soup.select('.result-link')):
-            if idx >= 10:  # Limit to 10 results
-                break
-                
-            title = result.text.strip()
-            href = None
-            
-            # Find the URL which is in the next sibling <td> with class "result-snippet"
-            if result.parent and result.parent.next_sibling:
-                url_cell = result.parent.next_sibling.find('a')
-                if url_cell and url_cell.has_attr('href'):
-                    href = url_cell['href']
-            
-            if title and href:
-                results.append(f"{idx+1}. {title}\n   {href}")
-        
+        urls = []
+
+        # Attempt to parse Bing results
+        result_blocks = soup.select('li.b_algo')
+        for i, result in enumerate(result_blocks[:10]):
+            title_elem = result.find('h2')
+            link_elem = title_elem.find('a') if title_elem else None
+
+            if title_elem and link_elem:
+                title = title_elem.text.strip()
+                link = link_elem.get('href')
+                results.append(f"{i+1}. {title}\n   {link}")
+                urls.append(link)
+
         if not results:
             results = ["No search results found. Please try a different search term."]
-        
-        # Cache the results
-        save_to_cache(url, results)
-        
-        return results
-        
+
+        save_to_cache(url, {"results": results, "urls": urls})
+        return {"results": results, "urls": urls}
+
     except Exception as e:
-        error_message = [f"Error parsing search results: {str(e)}. Please try a different search term."]
-        save_to_cache(url, error_message)  # Cache the error to avoid repeated failures
-        return error_message
+        error_message = [f"Error parsing Bing search results: {str(e)}."]
+        save_to_cache(url, {"results": error_message, "urls": []})
+        return {"results": error_message, "urls": []}
 
 def print_help():
     """Print help information"""
@@ -326,8 +369,8 @@ def main():
     elif args[0] == '-s' and len(args) > 1:
         search_term = " ".join(args[1:])
         print(f"Search results for '{search_term}':")
-        results = search(search_term)
-        for result in results:
+        search_data = search(search_term)
+        for result in search_data["results"]:
             print(result)
             print()
         
