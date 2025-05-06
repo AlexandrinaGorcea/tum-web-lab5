@@ -23,6 +23,18 @@ def parse_http_response(response):
     
     return headers, body
 
+def extract_status_code(response):
+    """Extract HTTP status code from response"""
+    first_line = response.split('\r\n')[0]
+    parts = first_line.split(' ')
+    if len(parts) >= 2 and parts[1].isdigit():
+        return int(parts[1])
+    return None
+
+def is_redirect(status_code):
+    """Check if status code is a redirect code"""
+    return status_code in [301, 302, 303, 307, 308]
+
 def make_http_request(host, path, port=80, use_ssl=False):
     """Make a basic HTTP request without built-in HTTP libraries"""
     # Create a socket connection
@@ -30,6 +42,7 @@ def make_http_request(host, path, port=80, use_ssl=False):
     s.settimeout(10)
     
     try:
+        # Wrap socket with SSL if needed
         if use_ssl:
             context = ssl.create_default_context()
             context.check_hostname = True
@@ -74,7 +87,7 @@ def make_http_request(host, path, port=80, use_ssl=False):
     finally:
         s.close()
 
-def request_url(url):
+def request_url(url, follow_redirects=True):
     """Make an HTTP request to the specified URL"""
     # Check if URL has protocol, if not add http://
     if not url.startswith("http://") and not url.startswith("https://"):
@@ -100,6 +113,23 @@ def request_url(url):
     
     # Make request
     response = make_http_request(host, path, port, use_ssl)
+    
+    # Handle redirects
+    if follow_redirects:
+        status_code = extract_status_code(response)
+        if status_code and is_redirect(status_code):
+            headers, _ = parse_http_response(response)
+            if headers and 'location' in headers:
+                new_url = headers['location']
+                # Handle relative URLs
+                if not new_url.startswith('http'):
+                    scheme = parsed_url.scheme or 'http'
+                    if new_url.startswith('/'):
+                        new_url = f"{scheme}://{host}{new_url}"
+                    else:
+                        new_url = f"{scheme}://{host}/{new_url}"
+                print(f"Redirecting to: {new_url}")
+                return request_url(new_url, follow_redirects)
     
     # Process response
     headers, body = parse_http_response(response)
