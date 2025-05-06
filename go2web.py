@@ -68,8 +68,11 @@ def is_redirect(status_code):
     """Check if status code is a redirect code"""
     return status_code in [301, 302, 303, 307, 308]
 
-def make_http_request(host, path, port=80, use_ssl=False):
+def make_http_request(host, path, headers=None, port=80, use_ssl=False):
     """Make a basic HTTP request without built-in HTTP libraries"""
+    if headers is None:
+        headers = {}
+    
     # Create a socket connection
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(10)
@@ -90,8 +93,15 @@ def make_http_request(host, path, port=80, use_ssl=False):
         request += f"Host: {host}\r\n"
         request += "Connection: close\r\n"
         request += "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\r\n"
-        request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+        request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8\r\n"
         request += "Accept-Language: en-US,en;q=0.9\r\n"
+        request += "Accept-Encoding: identity\r\n"
+        request += "Upgrade-Insecure-Requests: 1\r\n"
+        
+        # Add custom headers
+        for key, value in headers.items():
+            request += f"{key}: {value}\r\n"
+        
         request += "\r\n"
         
         # Send the request
@@ -114,10 +124,10 @@ def make_http_request(host, path, port=80, use_ssl=False):
         return f"Error: Could not resolve hostname: {host}"
     except ConnectionRefusedError:
         return f"Error: Connection refused by {host}:{port}"
+    except ConnectionResetError:
+        return f"Error: Connection reset by peer"
     except ssl.SSLError as e:
         return f"Error: SSL Error: {str(e)}"
-    except Exception as e:
-        return f"Error: {str(e)}"
     finally:
         s.close()
 
@@ -169,7 +179,7 @@ def extract_content_from_html(html):
     except Exception as e:
         return [f"Error parsing HTML content: {str(e)}"]
 
-def request_url(url, follow_redirects=True):
+def request_url(url, follow_redirects=True, accept_header=None):
     """Make an HTTP request to the specified URL"""
     # Check if URL has protocol, if not add http://
     if not url.startswith("http://") and not url.startswith("https://"):
@@ -178,10 +188,7 @@ def request_url(url, follow_redirects=True):
     # Check cache first
     cached_content = get_from_cache(url)
     if cached_content:
-        print(f"Information from {url} (cached):")
-        for line in cached_content:
-            print(line)
-        return
+        return cached_content
     
     # Parse URL
     parsed_url = urlparse(url)
@@ -201,8 +208,13 @@ def request_url(url, follow_redirects=True):
     else:
         port = 80
     
+    # Set headers
+    headers = {}
+    if accept_header:
+        headers['Accept'] = accept_header
+    
     # Make request
-    response = make_http_request(host, path, port, use_ssl)
+    response = make_http_request(host, path, headers, port, use_ssl)
     
     # Handle redirects
     if follow_redirects:
@@ -219,40 +231,31 @@ def request_url(url, follow_redirects=True):
                     else:
                         new_url = f"{scheme}://{host}/{new_url}"
                 print(f"Redirecting to: {new_url}")
-                return request_url(new_url, follow_redirects)
+                return request_url(new_url, follow_redirects, accept_header)
     
     # Process response
     headers, body = parse_http_response(response)
     
     if not headers:
-        print(f"Error: Invalid response format: {response[:200]}...")
-        return
+        return [f"Error: Invalid response format: {response[:200]}..."]
     
     # Process response based on content type
     content_type = headers.get('content-type', '').lower()
     
     if 'text/html' in content_type:
-        # Extract useful content from HTML
+        # Extract useful content from HTML using BeautifulSoup
         content = extract_content_from_html(body)
-        print(f"Information from {url}:")
-        for line in content:
-            print(line)
-        
-        # Cache the content
-        save_to_cache(url, content)
+        return content
     else:
         # For non-HTML, just print the content
-        print(f"Content from {url} (Content-Type: {content_type}):")
         if len(body) > 4000:
-            print(body[:4000])
-            print("... (output truncated)")
+            return [f"Content from {url} (Content-Type: {content_type}):", body[:4000], "... (output truncated)"]
         else:
-            print(body)
+            return [f"Content from {url} (Content-Type: {content_type}):", body]
 
 def search(term):
     """Search using DuckDuckGo and return results"""
     search_term = quote_plus(term)
-    
     # Use the lite version of DuckDuckGo which is more reliable for scraping
     url = f"https://lite.duckduckgo.com/lite?q={search_term}"
     
@@ -264,36 +267,29 @@ def search(term):
     # Make request
     response = make_http_request("lite.duckduckgo.com", f"/lite?q={search_term}", port=443, use_ssl=True)
     
-    # Extract search results using BeautifulSoup
     try:
         headers, body = parse_http_response(response)
         soup = BeautifulSoup(body, 'html.parser')
+        
         results = []
         
-        # DuckDuckGo lite uses a simple table structure
-        for i, tr in enumerate(soup.find_all('tr', class_='result-item')):
-            if i >= 10:  # Limit to 10 results
+        # Find all search result items
+        for idx, result in enumerate(soup.select('.result-link')):
+            if idx >= 10:  # Limit to 10 results
                 break
                 
-            try:
-                # Find link and snippet
-                link_elem = tr.find('a', class_='result-link') or tr.find('a')
-                snippet_elem = tr.find(class_='result-snippet') or tr.find_next_sibling('tr')
-                
-                if link_elem:
-                    title = link_elem.text.strip()
-                    href = link_elem.get('href', '')
-                    
-                    # Extract snippet if available
-                    snippet = ""
-                    if snippet_elem:
-                        snippet = snippet_elem.text.strip()
-                    
-                    results.append(f"{i+1}. {title}\n   {href}\n   {snippet}")
-            except Exception as e:
-                print(f"Error processing search result {i+1}: {str(e)}")
+            title = result.text.strip()
+            href = None
+            
+            # Find the URL which is in the next sibling <td> with class "result-snippet"
+            if result.parent and result.parent.next_sibling:
+                url_cell = result.parent.next_sibling.find('a')
+                if url_cell and url_cell.has_attr('href'):
+                    href = url_cell['href']
+            
+            if title and href:
+                results.append(f"{idx+1}. {title}\n   {href}")
         
-        # If no results found, provide a message
         if not results:
             results = ["No search results found. Please try a different search term."]
         
@@ -310,7 +306,7 @@ def search(term):
 def print_help():
     """Print help information"""
     print("go2web -u <URL>                # make an HTTP request to the specified URL and print the response")
-    print("go2web -s <search-term>        # search the term and print results")
+    print("go2web -s <search-term>        # search the term and print top 10 results")
     print("go2web -h                      # show this help")
 
 def main():
@@ -322,7 +318,11 @@ def main():
     
     if args[0] == '-u' and len(args) > 1:
         url = args[1]
-        request_url(url)
+        response = request_url(url)
+        print(f"Information from {url}:")
+        for line in response:
+            print(line)
+    
     elif args[0] == '-s' and len(args) > 1:
         search_term = " ".join(args[1:])
         print(f"Search results for '{search_term}':")
@@ -330,6 +330,7 @@ def main():
         for result in results:
             print(result)
             print()
+        
     else:
         print("Error: Invalid arguments.")
         print_help()
