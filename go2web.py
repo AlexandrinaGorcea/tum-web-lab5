@@ -38,6 +38,12 @@ def save_to_cache(url, content):
         Cache.url == url
     )
 
+def clear_cache():
+    """Clear all cached data"""
+    db = setup_cache()
+    db.truncate()  # Delete all records
+    print("Cache cleared successfully.")
+
 def parse_http_response(response):
     """Parse HTTP response into headers and body"""
     # Split response into headers and body
@@ -372,6 +378,7 @@ def print_help():
     print("go2web -u <URL>                        # make an HTTP request to the specified URL and print the response")
     print("go2web -s <search-term>                # search the term and print top 10 results")
     print("go2web -s <search-term> -a <number>    # search and access the specified result number")
+    print("go2web -c                              # clear the cache")
     print("go2web -h                              # show this help")
 
 def main():
@@ -415,6 +422,9 @@ def main():
                 print(result)
                 print()
             print("To access any of these results, use: go2web -s <search-term> -a <result-number>")
+    
+    elif args[0] == '-c':
+        clear_cache()
     
     else:
         print("Error: Invalid arguments.")
