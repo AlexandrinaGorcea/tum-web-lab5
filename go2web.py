@@ -3,6 +3,7 @@ import sys
 import os
 import time
 import ssl
+import subprocess
 from urllib.parse import urlparse, quote_plus
 from bs4 import BeautifulSoup
 from tinydb import TinyDB, Query
@@ -131,6 +132,86 @@ def make_http_request(host, path, headers=None, port=80, use_ssl=False):
     finally:
         s.close()
 
+def request_url(url, follow_redirects=True, accept_header=None):
+    """Make an HTTP request to the specified URL"""
+    # Check if URL has protocol, if not add http://
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "http://" + url
+    
+    # Check cache first
+    cached_content = get_from_cache(url)
+    if cached_content:
+        return cached_content
+    
+    # Parse URL
+    parsed_url = urlparse(url)
+    host = parsed_url.netloc
+    path = parsed_url.path
+    if not path:
+        path = "/"
+    if parsed_url.query:
+        path += "?" + parsed_url.query
+    
+    # Set up port and SSL
+    use_ssl = parsed_url.scheme == 'https'
+    if parsed_url.port:
+        port = parsed_url.port
+    elif use_ssl:
+        port = 443
+    else:
+        port = 80
+    
+    # Set headers
+    headers = {}
+    if accept_header:
+        headers['Accept'] = accept_header
+    
+    # Make request
+    response = make_http_request(host, path, headers, port, use_ssl)
+    
+    # Handle redirects
+    if follow_redirects:
+        status_code = extract_status_code(response)
+        if status_code and is_redirect(status_code):
+            headers, _ = parse_http_response(response)
+            if headers and 'location' in headers:
+                new_url = headers['location']
+                # Handle relative URLs
+                if not new_url.startswith('http'):
+                    scheme = parsed_url.scheme or 'http'
+                    if new_url.startswith('/'):
+                        new_url = f"{scheme}://{host}{new_url}"
+                    else:
+                        new_url = f"{scheme}://{host}/{new_url}"
+                print(f"Redirecting to: {new_url}")
+                return request_url(new_url, follow_redirects, accept_header)
+    
+    # Process response
+    headers, body = parse_http_response(response)
+    
+    if not headers:
+        return [f"Error: Invalid response format: {response[:200]}..."]
+    
+    # Handle content negotiation
+    content_type = headers.get('content-type', '').lower() if headers else ''
+    
+    # Process response based on content type
+    if 'application/json' in content_type or (body.strip().startswith('{') and body.strip().endswith('}')):
+        try:
+            import json
+            data = json.loads(body)
+            return format_json(data)
+        except json.JSONDecodeError as e:
+            return [f"Error parsing JSON content: {str(e)}"]
+    else:
+        # Extract useful content from HTML using BeautifulSoup
+        result = extract_content_from_html(body)
+    
+    # Cache the processed content
+    save_to_cache(url, result)
+    
+    return result
+
 def format_json(data, prefix="", max_depth=3, current_depth=0):
     """Format JSON data for human-readable output"""
     result = []
@@ -220,94 +301,9 @@ def extract_content_from_html(html):
             all_content.append("-- Links --")
             all_content.extend(links[:20])  # Limit to 20 links to avoid overwhelming output
         
-        # If no meaningful content was extracted, provide a message
-        if not all_content:
-            all_content = ["No meaningful content could be extracted from this page.", 
-                          "The page might require JavaScript or be protected against scraping."]
-        
         return all_content
     except Exception as e:
         return [f"Error parsing HTML content: {str(e)}"]
-
-def request_url(url, follow_redirects=True, accept_header=None):
-    """Make an HTTP request to the specified URL"""
-    # Check if URL has protocol, if not add http://
-    if not url.startswith("http://") and not url.startswith("https://"):
-        url = "http://" + url
-    
-    # Check cache first
-    cached_content = get_from_cache(url)
-    if cached_content:
-        return cached_content
-    
-    # Parse URL
-    parsed_url = urlparse(url)
-    host = parsed_url.netloc
-    path = parsed_url.path
-    if not path:
-        path = "/"
-    if parsed_url.query:
-        path += "?" + parsed_url.query
-    
-    # Set up port and SSL
-    use_ssl = parsed_url.scheme == 'https'
-    if parsed_url.port:
-        port = parsed_url.port
-    elif use_ssl:
-        port = 443
-    else:
-        port = 80
-    
-    # Set headers
-    headers = {}
-    if accept_header:
-        headers['Accept'] = accept_header
-    
-    # Make request
-    response = make_http_request(host, path, headers, port, use_ssl)
-    
-    # Handle redirects
-    if follow_redirects:
-        status_code = extract_status_code(response)
-        if status_code and is_redirect(status_code):
-            headers, _ = parse_http_response(response)
-            if headers and 'location' in headers:
-                new_url = headers['location']
-                # Handle relative URLs
-                if not new_url.startswith('http'):
-                    scheme = parsed_url.scheme or 'http'
-                    if new_url.startswith('/'):
-                        new_url = f"{scheme}://{host}{new_url}"
-                    else:
-                        new_url = f"{scheme}://{host}/{new_url}"
-                print(f"Redirecting to: {new_url}")
-                return request_url(new_url, follow_redirects, accept_header)
-    
-    # Process response
-    headers, body = parse_http_response(response)
-    
-    if not headers:
-        return [f"Error: Invalid response format: {response[:200]}..."]
-    
-    # Handle content negotiation
-    content_type = headers.get('content-type', '').lower() if headers else ''
-    
-    # Process response based on content type
-    if 'application/json' in content_type or (body.strip().startswith('{') and body.strip().endswith('}')):
-        try:
-            import json
-            data = json.loads(body)
-            return format_json(data)
-        except json.JSONDecodeError as e:
-            return [f"Error parsing JSON content: {str(e)}"]
-    else:
-        # Extract useful content from HTML using BeautifulSoup
-        result = extract_content_from_html(body)
-    
-    # Cache the processed content
-    save_to_cache(url, result)
-    
-    return result
 
 def search(term):
     """Search Bing and return top 10 results"""
@@ -346,11 +342,37 @@ def search(term):
         save_to_cache(url, {"results": error_message, "urls": []})
         return {"results": error_message, "urls": []}
 
+
+def access_search_result(search_term, result_number):
+    """Access a specific search result by its number"""
+    # Perform search
+    search_data = search(search_term)
+    
+    # Check if we have URLs and if the requested result exists
+    if not search_data or "urls" not in search_data or not search_data["urls"]:
+        print(f"No search results found for '{search_term}'")
+        return
+    
+    urls = search_data["urls"]
+    if result_number < 1 or result_number > len(urls):
+        print(f"Invalid result number. Please choose between 1 and {len(urls)}")
+        return
+    
+    # Get the URL for the specified result
+    url = urls[result_number - 1]
+    
+    # Request and display the content
+    print(f"Accessing result #{result_number} at {url}:")
+    response = request_url(url)
+    for line in response:
+        print(line)
+
 def print_help():
     """Print help information"""
-    print("go2web -u <URL>                # make an HTTP request to the specified URL and print the response")
-    print("go2web -s <search-term>        # search the term and print top 10 results")
-    print("go2web -h                      # show this help")
+    print("go2web -u <URL>                        # make an HTTP request to the specified URL and print the response")
+    print("go2web -s <search-term>                # search the term and print top 10 results")
+    print("go2web -s <search-term> -a <number>    # search and access the specified result number")
+    print("go2web -h                              # show this help")
 
 def main():
     args = sys.argv[1:]
@@ -368,12 +390,32 @@ def main():
     
     elif args[0] == '-s' and len(args) > 1:
         search_term = " ".join(args[1:])
-        print(f"Search results for '{search_term}':")
-        search_data = search(search_term)
-        for result in search_data["results"]:
-            print(result)
-            print()
         
+        # Check if -a flag is present
+        access_flag_index = -1
+        for i, arg in enumerate(args):
+            if arg == '-a' and i+1 < len(args):
+                access_flag_index = i
+                break
+        
+        if access_flag_index != -1:
+            # Extract search term and result number
+            search_term = " ".join(args[1:access_flag_index])
+            try:
+                result_number = int(args[access_flag_index + 1])
+                access_search_result(search_term, result_number)
+            except ValueError:
+                print("Error: Result number must be an integer")
+                print_help()
+        else:
+            # Just search and display results
+            print(f"Search results for '{search_term}':")
+            search_data = search(search_term)
+            for result in search_data["results"]:
+                print(result)
+                print()
+            print("To access any of these results, use: go2web -s <search-term> -a <result-number>")
+    
     else:
         print("Error: Invalid arguments.")
         print_help()
