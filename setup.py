@@ -6,6 +6,7 @@ setup(
     py_modules=["go2web"],
     install_requires=[
         "beautifulsoup4",
+        "tinydb",
     ],
     entry_points={
         "console_scripts": [
